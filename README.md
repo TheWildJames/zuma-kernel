@@ -12,7 +12,7 @@ Google automatically.
 |-------------------------|-------------------------------------------------------------------|------------------|
 | `main`                  | CI workflows + this README (no kernel source)                     | manual           |
 | `android14-6.1-2025-12` | The kernel source, mirrored from AOSP common                      | automated daily  |
-| `wild`                  | Alias of `android14-6.1-2025-12` (kept for compatibility)         | automated daily  |
+| `wild`                  | Alias of `android14-6.1-2025-12` (kept for compatibility)         | manual           |
 
 ## How the sync works
 
