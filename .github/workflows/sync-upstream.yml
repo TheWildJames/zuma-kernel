@@ -54,6 +54,7 @@ jobs:
           fi
 
       - name: Fast-forward to upstream
+        id: fast-forward
         if: steps.compare.outputs.behind != '0'
         run: |
           set -euo pipefail
@@ -64,7 +65,10 @@ jobs:
               echo "PUSHED ${ref}"
             else
               echo "REJECTED ${ref} (diverged or non-ff): $(tail -1 /tmp/push-err)"
-              echo "diverged_${ref}=1" >> "$GITHUB_OUTPUT"
+              case "${ref}" in
+                android14-6.1-2025-12) echo "diverged_main=1" >> "$GITHUB_OUTPUT" ;;
+                wild) echo "diverged_wild=1" >> "$GITHUB_OUTPUT" ;;
+              esac
             fi
           done
 
@@ -74,7 +78,7 @@ jobs:
           CURRENT: ${{ env.MIRROR_TIP }}
           UPSTREAM: ${{ env.UPSTREAM_TIP }}
           BEHIND: ${{ steps.compare.outputs.behind }}
-          DIV_MAIN: ${{ steps.fast-forward.outputs.diverged_android14-6.1-2025-12 }}
+          DIV_MAIN: ${{ steps.fast-forward.outputs.diverged_main }}
           DIV_WILD: ${{ steps.fast-forward.outputs.diverged_wild }}
         run: |
           set -euo pipefail
