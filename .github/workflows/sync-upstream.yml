@@ -13,10 +13,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # No full checkout needed: we only compare SHAs and fast-forward the
-      # branch ref. Shallow fetches of the two tips (commits+trees only, no
-      # blobs) keep this job to a few seconds; the deepen step below pulls
-      # just the new commits' objects when the mirror is behind.
+      # No full checkout needed: we only compare SHA tips and fast-forward
+      # the branch refs. Shallow blob-free fetches keep this job fast; the
+      # deepen below pulls full objects for just the new commits (required
+      # for the push).
       - name: Fetch mirror tip and upstream tip
         run: |
           set -euo pipefail
@@ -38,42 +38,44 @@ jobs:
           echo "Mirror   : ${CURRENT:0:12}"
           echo "Upstream : ${UPSTREAM:0:12}"
           if [ "${CURRENT}" = "${UPSTREAM}" ]; then
-            echo "ahead=0" >> "$GITHUB_OUTPUT"
             echo "behind=0" >> "$GITHUB_OUTPUT"
             echo "IN SYNC"
           else
-            # Deepen upstream history down to the mirror tip so we can count
-            # and fast-forward. Unfiltered: pulls full objects of new commits
-            # only (small for a daily delta).
+            # Deepen upstream history down to the mirror tip. The bottom
+            # commit becomes a shallow boundary, so ahead-counts are
+            # unreliable in shallow repos -- but the behind count and the
+            # commit list are exact, and the push itself is the authoritative
+            # fast-forward check (GitHub rejects non-ff pushes).
             cd sync
             git fetch -q --shallow-exclude="${CURRENT}" upstream android14-6.1-2025-12
-            AHEAD="$(git rev-list --count FETCH_HEAD..${CURRENT})"
             BEHIND="$(git rev-list --count ${CURRENT}..FETCH_HEAD)"
-            echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
             echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
-            echo "Ahead=${AHEAD} Behind=${BEHIND}"
+            echo "Behind=${BEHIND}"
           fi
 
       - name: Fast-forward to upstream
-        if: steps.compare.outputs.behind != '0' && steps.compare.outputs.ahead == '0'
+        if: steps.compare.outputs.behind != '0'
         run: |
           set -euo pipefail
           cd sync
-          # Push the upstream tip to the mirror refs. GitHub rejects a push
-          # that is not a fast-forward, so a diverged branch can never be
-          # clobbered.
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
-            FETCH_HEAD:refs/heads/android14-6.1-2025-12
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
-            FETCH_HEAD:refs/heads/wild
+          for ref in android14-6.1-2025-12 wild; do
+            if git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
+                FETCH_HEAD:refs/heads/${ref} 2>/tmp/push-err; then
+              echo "PUSHED ${ref}"
+            else
+              echo "REJECTED ${ref} (diverged or non-ff): $(tail -1 /tmp/push-err)"
+              echo "diverged_${ref}=1" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
       - name: Write change summary
         if: always()
         env:
           CURRENT: ${{ env.MIRROR_TIP }}
           UPSTREAM: ${{ env.UPSTREAM_TIP }}
-          AHEAD: ${{ steps.compare.outputs.ahead }}
           BEHIND: ${{ steps.compare.outputs.behind }}
+          DIV_MAIN: ${{ steps.fast-forward.outputs.diverged_android14-6.1-2025-12 }}
+          DIV_WILD: ${{ steps.fast-forward.outputs.diverged_wild }}
         run: |
           set -euo pipefail
           {
@@ -81,13 +83,18 @@ jobs:
             echo
             echo "**Mirror:** \`${CURRENT:0:12}\` → **\`${UPSTREAM:0:12}\`**"
             echo
-            if [ "${AHEAD}" = "0" ] && [ "${BEHIND}" = "0" ]; then
+            if [ "${BEHIND}" = "0" ]; then
               echo "✅ Already in sync — no changes."
-            elif [ "${AHEAD}" != "0" ]; then
-              echo "⚠️ **Diverged:** mirror is ${AHEAD} commit(s) ahead of upstream."
-              echo "Not fast-forwarded (ff-only policy); push was skipped."
             else
-              echo "🔄 Pulled ${BEHIND} new commit(s) and fast-forwarded."
+              echo "🔄 Upstream ${BEHIND} commit(s) ahead."
+              if [ -z "${DIV_MAIN}" ] && [ -z "${DIV_WILD}" ]; then
+                echo "✅ Both branches fast-forwarded."
+              else
+                echo "⚠️  Push rejected for:"
+                [ -n "${DIV_MAIN}" ] && echo "  - android14-6.1-2025-12 (has local commits upstream lacks)"
+                [ -n "${DIV_WILD}" ] && echo "  - wild (has local commits upstream lacks)"
+                echo "Fix manually (reset or rebase), then re-run."
+              fi
               echo
               echo "### Commits applied"
               echo '```'
