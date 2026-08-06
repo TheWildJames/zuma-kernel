@@ -56,6 +56,8 @@ jobs:
       - name: Fast-forward to upstream
         id: fast-forward
         if: steps.compare.outputs.behind != '0'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd sync
