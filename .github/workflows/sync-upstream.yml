@@ -13,78 +13,66 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # No checkout at all: compare SHA tips, then fast-forward the branch.
-      # The current tip is read via ls-remote (no objects), so git skips its
-      # local fast-forward check and GitHub's server -- which has the full
-      # history -- is the authority on whether the push is a fast-forward.
-      - name: Fetch upstream tip and compare
+      - name: Checkout android14-6.1-2025-12
+        uses: actions/checkout@v4
+        with:
+          ref: android14-6.1-2025-12
+          fetch-depth: 0
+          filter: 'blob:none'
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://android.googlesource.com/kernel/common
+          git fetch upstream android14-6.1-2025-12
+
+      - name: Compare commits
         id: compare
         run: |
           set -euo pipefail
-          git init -q sync
-          cd sync
-          git remote add upstream https://android.googlesource.com/kernel/common
-          CURRENT="$(git ls-remote https://github.com/TheWildJames/zuma-kernel.git \
-            refs/heads/android14-6.1-2025-12 | cut -f1)"
-          git fetch -q --depth=1 --filter=blob:none upstream android14-6.1-2025-12
+          CURRENT="$(git rev-parse HEAD)"
           UPSTREAM="$(git rev-parse FETCH_HEAD)"
+          AHEAD="$(git rev-list --count FETCH_HEAD..HEAD)"
+          BEHIND="$(git rev-list --count HEAD..FETCH_HEAD)"
           echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
           echo "upstream=${UPSTREAM}" >> "$GITHUB_OUTPUT"
-          echo "Mirror   : ${CURRENT:0:12}"
-          echo "Upstream : ${UPSTREAM:0:12}"
-          if [ "${CURRENT}" = "${UPSTREAM}" ]; then
-            echo "behind=0" >> "$GITHUB_OUTPUT"
-            echo "IN SYNC"
-          else
-            # Deepen upstream history down to the mirror tip: pulls full
-            # objects for just the new commits (needed for the push).
-            git fetch -q --shallow-exclude="${CURRENT}" upstream android14-6.1-2025-12
-            BEHIND="$(git rev-list --count ${CURRENT}..FETCH_HEAD)"
-            echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
-            echo "Behind=${BEHIND}"
-          fi
+          echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+          echo "Mirror   : ${CURRENT:0:12} (ahead=${AHEAD})"
+          echo "Upstream : ${UPSTREAM:0:12} (behind=${BEHIND})"
 
       - name: Fast-forward to upstream
-        id: fast-forward
-        if: steps.compare.outputs.behind != '0'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        if: steps.compare.outputs.behind != '0' && steps.compare.outputs.ahead == '0'
         run: |
           set -euo pipefail
-          cd sync
-          if git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
-              FETCH_HEAD:refs/heads/android14-6.1-2025-12 2>/tmp/push-err; then
-            echo "PUSHED android14-6.1-2025-12"
-          else
-            echo "REJECTED (diverged or non-ff): $(tail -3 /tmp/push-err)"
-            echo "diverged=1" >> "$GITHUB_OUTPUT"
-          fi
+          git merge --ff-only FETCH_HEAD
+          git push origin android14-6.1-2025-12
 
       - name: Write change summary
         if: always()
         env:
           CURRENT: ${{ steps.compare.outputs.current }}
           UPSTREAM: ${{ steps.compare.outputs.upstream }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
           BEHIND: ${{ steps.compare.outputs.behind }}
-          DIVERGED: ${{ steps.fast-forward.outputs.diverged }}
         run: |
           set -euo pipefail
           {
             echo "## Sync android14-6.1-2025-12"
             echo
-            echo "**Mirror:** \`${CURRENT:0:12}\` → **\`${UPSTREAM:0:12}\`**"
+            echo "**Mirror:** \`${CURRENT:0:12}\`"
+            echo "**Upstream:** \`${UPSTREAM:0:12}\`"
             echo
-            if [ "${BEHIND}" = "0" ]; then
+            if [ "${AHEAD}" = "0" ] && [ "${BEHIND}" = "0" ]; then
               echo "✅ Already in sync — no changes."
-            elif [ -n "${DIVERGED}" ]; then
-              echo "⚠️  Push rejected: the mirror has local commits upstream lacks."
-              echo "Fix manually (reset or rebase), then re-run."
+            elif [ "${AHEAD}" != "0" ]; then
+              echo "⚠️ **Diverged:** mirror is ${AHEAD} commit(s) ahead of upstream."
+              echo "Not fast-forwarded (ff-only policy); push was skipped."
             else
               echo "🔄 Pulled ${BEHIND} new commit(s) and fast-forwarded."
               echo
               echo "### Commits applied"
               echo '```'
-              cd sync
               git log --oneline --no-merges "${CURRENT}..${UPSTREAM}" | head -200
               echo '```'
             fi
