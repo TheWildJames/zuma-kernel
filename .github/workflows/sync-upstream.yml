@@ -1,0 +1,98 @@
+name: Sync android14-6.1-2025-12 with upstream
+
+on:
+  schedule:
+    # Daily at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # No full checkout needed: we only compare SHAs and fast-forward the
+      # branch ref. Shallow fetches of the two tips (commits+trees only, no
+      # blobs) keep this job to a few seconds; the deepen step below pulls
+      # just the new commits' objects when the mirror is behind.
+      - name: Fetch mirror tip and upstream tip
+        run: |
+          set -euo pipefail
+          git init -q sync
+          cd sync
+          git remote add origin https://github.com/TheWildJames/zuma-kernel.git
+          git remote add upstream https://android.googlesource.com/kernel/common
+          git fetch -q --depth=1 --filter=blob:none origin android14-6.1-2025-12
+          git fetch -q --depth=1 --filter=blob:none upstream android14-6.1-2025-12
+          echo "MIRROR_TIP=$(git rev-parse origin/android14-6.1-2025-12)" >> "$GITHUB_ENV"
+          echo "UPSTREAM_TIP=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+
+      - name: Compare commits
+        id: compare
+        run: |
+          set -euo pipefail
+          CURRENT="${MIRROR_TIP}"
+          UPSTREAM="${UPSTREAM_TIP}"
+          echo "Mirror   : ${CURRENT:0:12}"
+          echo "Upstream : ${UPSTREAM:0:12}"
+          if [ "${CURRENT}" = "${UPSTREAM}" ]; then
+            echo "ahead=0" >> "$GITHUB_OUTPUT"
+            echo "behind=0" >> "$GITHUB_OUTPUT"
+            echo "IN SYNC"
+          else
+            # Deepen upstream history down to the mirror tip so we can count
+            # and fast-forward. Unfiltered: pulls full objects of new commits
+            # only (small for a daily delta).
+            cd sync
+            git fetch -q --shallow-exclude="${CURRENT}" upstream android14-6.1-2025-12
+            AHEAD="$(git rev-list --count FETCH_HEAD..${CURRENT})"
+            BEHIND="$(git rev-list --count ${CURRENT}..FETCH_HEAD)"
+            echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
+            echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+            echo "Ahead=${AHEAD} Behind=${BEHIND}"
+          fi
+
+      - name: Fast-forward to upstream
+        if: steps.compare.outputs.behind != '0' && steps.compare.outputs.ahead == '0'
+        run: |
+          set -euo pipefail
+          cd sync
+          # Push the upstream tip to the mirror refs. GitHub rejects a push
+          # that is not a fast-forward, so a diverged branch can never be
+          # clobbered.
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
+            FETCH_HEAD:refs/heads/android14-6.1-2025-12
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/TheWildJames/zuma-kernel.git" \
+            FETCH_HEAD:refs/heads/wild
+
+      - name: Write change summary
+        if: always()
+        env:
+          CURRENT: ${{ env.MIRROR_TIP }}
+          UPSTREAM: ${{ env.UPSTREAM_TIP }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          BEHIND: ${{ steps.compare.outputs.behind }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Sync android14-6.1-2025-12"
+            echo
+            echo "**Mirror:** \`${CURRENT:0:12}\` → **\`${UPSTREAM:0:12}\`**"
+            echo
+            if [ "${AHEAD}" = "0" ] && [ "${BEHIND}" = "0" ]; then
+              echo "✅ Already in sync — no changes."
+            elif [ "${AHEAD}" != "0" ]; then
+              echo "⚠️ **Diverged:** mirror is ${AHEAD} commit(s) ahead of upstream."
+              echo "Not fast-forwarded (ff-only policy); push was skipped."
+            else
+              echo "🔄 Pulled ${BEHIND} new commit(s) and fast-forwarded."
+              echo
+              echo "### Commits applied"
+              echo '```'
+              cd sync
+              git log --oneline --no-merges "${CURRENT}..${UPSTREAM}" | head -200
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
